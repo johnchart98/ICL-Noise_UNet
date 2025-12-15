@@ -63,14 +63,6 @@ Use **comparison.py** to benchmark multiple segmentation models.
 python comparison.py
 ```
 
-Supported comparisons:
-- ICL-Noise-UNet
-- nnU-Net
-- UNETR
-- Swin-UNet
-- WContextNet
-- MultiverSegNet
-
 Outputs:
 - Dice and IoU scores
 - CSV summaries
@@ -89,7 +81,7 @@ Core components:
 - Residual + local variance noise maps
 - Context-guided feature fusion
 
-### Other Models
+### Example Comparison Models
 Located in `models/`:
 - `UNet.py`
 - `unetr.py`
