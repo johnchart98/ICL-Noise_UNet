@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import torch
+import cv2
 from torch import nn, optim
 from matplotlib import pyplot as plt
 import numpy as np
@@ -27,10 +28,9 @@ import os
 import matplotlib.pyplot as plt
 from util.shapecheck import ShapeChecker
 from functools import lru_cache
-from scipy.ndimage import distance_transform_edt as distance_transform
 from glob import glob
 import pandas as pd
-from dataloaders import reading_data_tg3k,reading_training_data_fetal, reading_camus_data, reading_busi_data, reading_busbra, get_data_jnu,get_frame_labels, read_and_split_busi_data, read_and_split_busbra_data, read_data_jnu
+from dataloaders import split_training_data,reading_data_tg3k,reading_training_data_fetal, reading_camus_data, reading_busi_data, reading_busbra, get_data_jnu,get_frame_labels, read_and_split_busi_data, read_and_split_busbra_data, read_data_jnu
 from models.nn_unet import NnUNet
 from models.unetr import UNETR2D
 from models.swin_unet import SwinUNet
@@ -299,7 +299,7 @@ class EvalDataset(Dataset):
     def __getitem__(self, idx):
         # Process target (with padding)
         target_img, target_mask = self.target_data[idx]
-
+        #target_img, target_mask,filename = self.target_data[idx]
         target_img = torch.tensor(np.ascontiguousarray(target_img), dtype=torch.float32)  # [H, W]
         target_mask = torch.tensor(np.ascontiguousarray(target_mask), dtype=torch.float32)  # [H, W]
 
@@ -308,7 +308,8 @@ class EvalDataset(Dataset):
    
         # --- Find k closest context samples based on L2 distance ---
         distances = []
-        for context_img, context_mask in self.context_dataset:         
+        # iterate context_dataset but don't overwrite the target `filename` variable
+        for context_img, context_mask in self.context_dataset:
             ctx_tensor = torch.tensor(np.ascontiguousarray(context_img), dtype=torch.float32)
             distances.append(torch.norm(target_img - ctx_tensor).item())
             
@@ -335,11 +336,11 @@ class EvalDataset(Dataset):
             target_img.unsqueeze(0).unsqueeze(0),
             target_mask.unsqueeze(0).unsqueeze(0),
             context_imgs_tensor.unsqueeze(1) ,
-            context_masks_tensor.unsqueeze(1)  
+            context_masks_tensor.unsqueeze(1),
         )
 
 class UltrasoundDataModule(LightningDataModule):
-    def __init__(self, X_train, X_init, X_val, X_test, batch_size=32,num_workers=0,no_edges=True):
+    def __init__(self, X_train, X_init, X_val, X_test, batch_size=4,num_workers=0,no_edges=True):
         super().__init__()
         self.X_train = X_train
         self.X_init = X_init
@@ -471,6 +472,7 @@ def test_all_models(data_module, checkpoints, save_dir="comparisons", device="cu
         name: BaseSegModel(name, ckpt, device=device)
         for name, ckpt in checkpoints.items()
     }
+    models.update({"sam2-sgp": None})  
 
 
     test_loader = data_module.test_dataloader()
@@ -482,8 +484,20 @@ def test_all_models(data_module, checkpoints, save_dir="comparisons", device="cu
     print("🚀 Starting model comparison...\n")
     all_metrics = []
     for batch_idx, batch in enumerate(tqdm(test_loader)):
-        target, mask, context_img, context_mask = batch
-        sam2_pred = torch.ones_like(target)  
+        target, mask, context_img, context_mask,filename = batch
+        sam2_pred = 0.1*torch.ones_like(target)  
+        samdir = os.listdir("Results_RADBOUD_MEDSAM2")
+        samdir = [x.replace(".jpg","") for x in samdir]
+        #if filename[0] in samdir:
+        #    sam_path = os.path.join("Results_RADBOUD_MEDSAM2",filename[0]+"_prediction.jpg")
+        #    sam2_pred = cv2.imread(sam_path, cv2.IMREAD_GRAYSCALE)
+        #    sam2_pred = cv2.resize(sam2_pred, (192, 192), interpolation=cv2.INTER_NEAREST)
+        #    sam2_pred = cv2.normalize(sam2_pred.astype(np.float32), None, 0, 1, cv2.NORM_MINMAX)
+        #    sam2_pred = (sam2_pred > 0.5).astype(np.float32)
+        #    sam2_pred = torch.tensor(sam2_pred, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  
+        
+
+            
 
         if sam2_pred.sum() > 0:
             img = target[0,0].detach().cpu()
@@ -503,7 +517,6 @@ def test_all_models(data_module, checkpoints, save_dir="comparisons", device="cu
                 elif name.lower() == "sam2-sgp": 
                     preds = sam2_pred.to("cuda")
                     print(f"sam2_pred sum: {sam2_pred.sum()}")
-
                 else :
                     model.eval()
                     preds = model(target.to("cuda").squeeze(1), context_img.to("cuda").squeeze(1), context_mask.to("cuda").squeeze(1))
@@ -593,15 +606,13 @@ def test_inference_models(data_module, checkpoints, save_dir="comparisons", devi
 
                     img_np=img_np[0,:,:]
                     mask_np=mask_np[0,:,:]
-                    img_np = np.rot90(img_np, k=3)   # 90° clockwise
-                    mask_np = np.rot90(mask_np, k=3)
-            
+                    
                         
                     dice,iou = calculate_metrics(preds, mask.to("cuda"),name)
                     dice = dice.item()
                     iou = iou.item()
-                    preds= preds[0,0].detach().cpu()  # convert logits to [0,1]
-                    pred_np = (preds> 0.5).squeeze().numpy().astype(float)  # binarize
+                    #preds= preds[0,0].detach().cpu()  # convert logits to [0,1]
+                    #pred_np = (preds> 0.5).squeeze().numpy().astype(float)  # binarize
                     
                     all_metrics.append({"batch_idx": batch_idx, "model": name, "dice": dice, "iou": iou})
 
@@ -626,24 +637,112 @@ def test_inference_models(data_module, checkpoints, save_dir="comparisons", devi
     print(f"📊 Metrics saved to: {metrics_path}")
     print(f"📈 Summary saved to: {summary_path}\n")
     print(summary)
+
+
+def compare_ICL_context_checkpoints(data_module, checkpoints, save_dir="ICL_context_compare", device="cuda"):
+    """
+    checkpoints = {context_size:int : checkpoint_path:str}
+    Example:
+    {1:"ckpt1.ckpt", 2:"ckpt2.ckpt", 4:"ckpt4.ckpt", ...}
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    results = []
+    metrics_list = []
+    csv_path = os.path.join(save_dir, "context_summary_results.csv")
+    metrics_path = os.path.join(save_dir, "context_full_results.csv")
+    with open(csv_path, "w") as f:
+        f.write("context_size,dice_mean,iou_mean\n")
+
+    print("\n🚀 Evaluating ICL-NoiseUNet context variations:\n")
+
+    for ctx_size, ckpt in checkpoints.items():
+
+        print(f"\n================ Context Size = {ctx_size} ================")
+
+        # load model for current checkpoint
+        model = BaseSegModel("ICL-NoISEUNet", ckpt, device=device)
+        model.eval()
+        data_module.train_dataset.context_size = ctx_size
+        data_module.val_dataset.context_size = ctx_size
+        data_module.test_dataset.context_size = ctx_size
+        test_loader = data_module.test_dataloader()
+
+
+        dice_list, iou_list = [], []
+
+        for batch_idx, batch in enumerate(test_loader):
+            target, mask, context_imgs, context_masks = batch
+
+            with torch.no_grad():
+                preds = model(
+                    target.to(device).squeeze(1),
+                    context_imgs.to(device).squeeze(1),
+                    context_masks.to(device).squeeze(1)
+                )
+
+            dice, iou = calculate_metrics(preds, mask.to(device), "icl-noiseunet")
+            dice = dice.item()
+            iou = iou.item()
+            metrics_list.append({"batch_idx": batch_idx, "context_size": ctx_size, "dice": dice, "iou": iou})
+            dice_list.append(dice)
+            iou_list.append(iou)
+            # 🖼 Save first few samples
+            #if batch_idx < 5:
+            #    pred_np = (preds[0,0] > 0.5).cpu().numpy() * 255
+            #    Image.fromarray(pred_np.astype(np.uint8)).save(
+            #        f"{save_dir}/ctx{ctx_size}_sample{batch_idx}.png"
+            #    )
+
+        # compute mean metrics for this context size
+        d_mean, i_mean = np.mean(dice_list), np.mean(iou_list)
+
+        print(f"📊 Context={ctx_size} → Dice={d_mean:.4f} | IoU={i_mean:.4f}")
+
+
+
+        results.append([ctx_size, d_mean,np.std(dice_list), i_mean,np.std(iou_list)])
+
+    results_df=pd.DataFrame(results,columns=["context_size","dice_mean","dice_std","iou_mean","iou_std"])
+    results_df.to_csv(csv_path,index=False)
+    metrics_df=pd.DataFrame(metrics_list)
+    metrics_df.to_csv(metrics_path,index=False)
+
 # ------------------------------------------------------------------
 # Entry Point
 # ------------------------------------------------------------------
-
-X, Y, V = read_and_split_busi_data(busi_root='./BUSI')
+print(torch.cuda.get_device_name(0))
+frame_label_dict = get_frame_labels()
+X_5, V_5, Y_5 = get_data_jnu(frame_label_dict, label='5')
+X, V, Y = read_data_jnu(X_5, target_size=(192, 192)), read_data_jnu(V_5, target_size=(192, 192)), read_data_jnu(Y_5, target_size=(192, 192))
 X_init = X.copy()
+#X, V, Y = reading_camus_data()
+#X, V, Y = split_training_data(image_pairs)
 data_module = UltrasoundDataModule(X, X_init, V, Y, batch_size=1, num_workers=4, no_edges=True)
 data_module.setup()
 
     # Define all model checkpoints
-checkpoints = {
-        
-        "ICL-NoiseUNet":  "{model_path}",
-        "MultiverSegNet":  "{model_path}",
-        "nn-UNet": "{model_path}",
-        "UNET-Transformer":  "{model_path}",
-}
+#checkpoints = { 
+#        "ICL-NoiseUNet":  "lightning_radboud_noise_BLOCK/model_logs/version_1/checkpoints/best-epoch=20-val_loss=0.03-.ckpt",
+#        "MultiverSegNet":  "radboud_multiverseg/model_logs/version_0/checkpoints/best-epoch=15-val_loss=0.052900-.ckpt",
+#        "nn-UNet": "radboud_nnunet/model_logs/version_0/checkpoints/best-epoch=19-val_loss=0.209042-.ckpt",
+#        "Swin-UNet":  "radboud_swinunet/model_logs/version_1/checkpoints/best-epoch=14-val_loss=0.037503-.ckpt",
+#        "UNet-Transformer": "radboud_unetr/model_logs/version_0/checkpoints/best-epoch=15-val_loss=0.041603-.ckpt",
+#}
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-test_all_models(data_module, checkpoints, save_dir="model", device=device)
+#test_all_models(data_module, checkpoints, save_dir="model_radboud_comp", device=device)
+context_checkpoints = {
+    1:  "iclnoise_jnu_comp1/model_logs/version_1/checkpoints/best-epoch=26-val_loss=0.033193-.ckpt",
+    2:  "iclnoise_jnu_comp2/model_logs/version_0/checkpoints/best-epoch=16-val_loss=0.033081-.ckpt",
+    4:  "iclnoise_jnu_comp4/model_logs/version_0/checkpoints/best-epoch=15-val_loss=0.033087-.ckpt",
+    8:  "iclnoise_jnu_comp8/model_logs/version_0/checkpoints/best-epoch=10-val_loss=0.035694-.ckpt",
+    16: "iclnoise_jnu_comp16/model_logs/version_0/checkpoints/best-epoch=12-val_loss=0.123271-.ckpt",
+}
 
+compare_ICL_context_checkpoints(
+    data_module,
+    context_checkpoints,
+    save_dir="ICL_context_results_RADBOUD",
+    device=device
+)

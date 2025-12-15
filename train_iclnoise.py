@@ -16,9 +16,11 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 from torch import optim
+from models.multiverseg.models.network import MultiverSegNet
 from models.nn_unet import NnUNet
 from models.unetr import UNETR2D
 from models.swin_unet import SwinUNet
+from models.pairwise_conv_avg_model import PairwiseConvAvgModel
 from models.NoiseContext import ContextNoiseUNet
 import os
 import matplotlib.pyplot as plt
@@ -32,7 +34,7 @@ from scipy.ndimage import distance_transform_edt as distance_transform
 from glob import glob
 import csv
 import pandas as pd
-from dataloaders import reading_training_data_fetal, reading_camus_data, reading_data, reading_data_tg3k, get_data_jnu,get_frame_labels, read_and_split_busi_data, read_and_split_busbra_data, read_data_jnu
+from dataloaders import reading_training_data_fetal, reading_camus_data, reading_data, reading_data_tg3k, get_data_jnu,get_frame_labels, read_and_split_busi_data, read_and_split_busbra_data, read_data_jnu,split_training_data
 
 
 
@@ -66,6 +68,13 @@ class LightningModel(pl.LightningModule):
         self.save_dir="exp_1"
         os.makedirs(self.save_dir, exist_ok=True)
         self.net=ContextNoiseUNet()
+        #self.net = MultiverSegNet(encoder_blocks=[64, 64, 64, 64])
+        #self.net=ContextNoiseWNet()
+        #self.net=ContextNoiseUNet()
+        #self.net=UNETR2D(img_shape=(192, 192), input_dim=1, output_dim=1)
+        #self.net=NnUNet(in_channels=1, out_channels=1, base_num_features=16, num_pool=4, ndim=2, deep_supervision=False)
+        #self.net=SwinUNet()
+
        
         
         # Loss function
@@ -82,8 +91,9 @@ class LightningModel(pl.LightningModule):
         target_images=target_images.to("cuda")
         target_masks=target_masks.to("cuda")
         context_images=context_images.to("cuda")
+        context_masks=context_masks.to("cuda")
 
-        pred_masks = self(target_images.squeeze(1), context_images.squeeze(1))        
+        pred_masks = self(target_images.squeeze(1), context_images.squeeze(1),context_masks.squeeze(1))        
         loss = self.criterion(pred_masks,target_masks.squeeze(1))
         metrics = self._calculate_metrics(pred_masks, target_masks)
         self.log_dict({f"train_{k}": v for k, v in metrics.items()}, prog_bar=True)
@@ -93,7 +103,7 @@ class LightningModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         target_images, target_masks, context_images,context_mask = batch
         # Forward pass
-        pred_masks = self(target_images.squeeze(1), context_images.squeeze(1))
+        pred_masks = self(target_images.squeeze(1), context_images.squeeze(1),context_mask.squeeze(1))        
 
         loss = self.criterion(pred_masks, target_masks.squeeze(1)) 
         # Calculate metrics
@@ -111,7 +121,7 @@ class LightningModel(pl.LightningModule):
         target_images, target_masks, context_images,context_mask = batch
 
         # Forward pass
-        pred_masks = self(target_images.squeeze(1), context_images.squeeze(1))
+        pred_masks = self(target_images.squeeze(1), context_images.squeeze(1),context_mask.squeeze(1))        
 
         # Calculate loss
         loss = self.criterion(pred_masks, target_masks.squeeze(1)) 
@@ -220,7 +230,9 @@ class LightningModel(pl.LightningModule):
 # =============================================================================
 # Data Preparation
 # =============================================================================
-X, Y, V = read_and_split_busbra_data(busbra_root="./BUSBRA", target_size=(192, 192))
+
+X, Y, V = reading_camus_data()
+
 X_init = X.copy()
 X = augment_data(X, context=False, target_size=(192, 192))
 
@@ -344,7 +356,7 @@ class EvalDataset(Dataset):
 
 
 class UltrasoundDataModule(LightningDataModule):
-    def __init__(self, X_train, X_init, X_val, X_test, batch_size=8,num_workers=0,no_edges=True):
+    def __init__(self, X_train, X_init, X_val, X_test, batch_size=4,num_workers=0):
         super().__init__()
         self.X_train = X_train
         self.X_init = X_init
@@ -352,16 +364,15 @@ class UltrasoundDataModule(LightningDataModule):
         self.X_test = X_test
         self.batch_size = batch_size
         self.num_workers=num_workers
-        self.no_edges=no_edges
     def setup(self, stage=None):
         # Training set
-        self.train_dataset = TrainDataset(self.X_train, self.X_init,context_size=4,no_edges=self.no_edges)
+        self.train_dataset = TrainDataset(self.X_train, self.X_init,context_size=16)
 
         
         
         # Validation/Test sets
-        self.val_dataset = EvalDataset(self.X_val, self.X_init, context_size=4,no_edges=self.no_edges)
-        self.test_dataset = EvalDataset(self.X_test, self.X_init, context_size=4,no_edges=self.no_edges)
+        self.val_dataset = EvalDataset(self.X_val, self.X_init, context_size=16)
+        self.test_dataset = EvalDataset(self.X_test, self.X_init, context_size=16)
         
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True,num_workers=self.num_workers)
@@ -376,7 +387,7 @@ class UltrasoundDataModule(LightningDataModule):
 # =============================================================================
 
 # Prepare the data module
-data_module = UltrasoundDataModule(X, X_init, V, Y, batch_size=4,num_workers=8,no_edges=True)
+data_module = UltrasoundDataModule(X, X_init, V, Y, batch_size=1,num_workers=8)
 
 # Manually call setup to initialize the datasets
 data_module.setup()  # This will create train_dataset, val_dataset, and test_dataset
@@ -391,7 +402,7 @@ logging.basicConfig(
     ]
 )
 
-logger = TensorBoardLogger("lightning_iclnoise", name="model_logs")
+logger = TensorBoardLogger("iclnoise", name="model_logs")
 
 # Initialize your model
 hparams = {
@@ -417,11 +428,11 @@ early_stop_callback = EarlyStopping(
 
 # Initialize trainer
 trainer = pl.Trainer(
-    max_epochs=50,
+    max_epochs=30,
     callbacks=[checkpoint_callback, early_stop_callback],
     logger=logger,
     accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-    devices=4,
+    devices=2,
     strategy="ddp_find_unused_parameters_true"
 )
 
@@ -433,6 +444,10 @@ logging.info(f"Test samples: {len(data_module.test_dataset)}")
 # Train the model
 trainer.fit(model, data_module.train_dataloader(), data_module.val_dataloader())
 
+
+
+#model = LightningModel.load_from_checkpoint("lightning_radboud_noise_BLOCK/model_logs/version_1/checkpoints/best-epoch=20-val_loss=0.03-.ckpt", strict=False)
+#model = LightningModel.load_from_checkpoint("lightning_iclnoise_camus/model_logs/version_0/checkpoints/best-epoch=35-val_dice=0.949292-.ckpt", strict=False)
 logging.info("Training complete")
 
 # Test the model
