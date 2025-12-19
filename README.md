@@ -166,4 +166,4 @@ Contributions are welcome.
 
 ## License
 
-MIT License. See `LICENSE` for details.
+MIT License. 
