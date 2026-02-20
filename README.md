@@ -86,7 +86,6 @@ Located in `models/`:
 - `UNet.py`
 - `unetr.py`
 - `swin_unet.py`
-- `nn_unet.py`
 - `WContextNet.py`
 - `multiverseg/`
 
