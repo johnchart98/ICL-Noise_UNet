@@ -126,7 +126,6 @@ ICL-Noise_UNet/
 │   ├── UNet.py
 │   ├── unetr.py
 │   ├── swin_unet.py
-│   ├── nn_unet.py
 │   └── WContextNet.py
 └── requirements.txt
 ```
